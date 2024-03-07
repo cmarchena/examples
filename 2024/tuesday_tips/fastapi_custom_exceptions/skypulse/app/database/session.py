@@ -1,12 +1,66 @@
-from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Any, AsyncGenerator
-from sqlalchemy.orm import sessionmaker
-from .engine import engine
+from loguru import logger
+import contextlib
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    AsyncEngine,
+    create_async_engine,
+    async_sessionmaker,
+    AsyncConnection,
+)
+from typing import AsyncIterator
 
-async_session_factory = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)  # type: ignore
+from app.config import settings
+from app.exceptions.exceptions import ServiceError
+from sqlalchemy.exc import SQLAlchemyError
 
 
-# Dependency to get DB session
-async def get_db_session() -> AsyncGenerator[Any, AsyncSession]:
-    async with async_session_factory() as session:  # type: ignore
+class DatabaseSessionManager:
+    def __init__(self, host: str):
+        self._engine: AsyncEngine | None = create_async_engine(host)
+        self._sessionmaker: async_sessionmaker[AsyncSession] = async_sessionmaker(
+            autocommit=False, bind=self._engine
+        )
+
+    async def close(self):
+        if self._engine is None:
+            raise ServiceError
+        await self._engine.dispose()
+        self._engine = None
+        self._sessionmaker = None  # type: ignore
+
+    @contextlib.asynccontextmanager
+    async def connect(self) -> AsyncIterator[AsyncConnection]:
+        if self._engine is None:
+            raise ServiceError
+
+        async with self._engine.begin() as connection:
+            try:
+                yield connection
+            except SQLAlchemyError:
+                await connection.rollback()
+                logger.error("Connection error occurred")
+                raise ServiceError
+
+    @contextlib.asynccontextmanager
+    async def session(self) -> AsyncIterator[AsyncSession]:
+        if not self._sessionmaker:
+            logger.error("Sessionmaker is not available")
+            raise ServiceError
+
+        session = self._sessionmaker()
+        try:
+            yield session
+        except SQLAlchemyError:
+            await session.rollback()
+            logger.error("Session error could not be established")
+            raise ServiceError
+        finally:
+            await session.close()
+
+
+sessionmanager = DatabaseSessionManager(settings.database_url)
+
+
+async def get_db_session():
+    async with sessionmanager.session() as session:
         yield session

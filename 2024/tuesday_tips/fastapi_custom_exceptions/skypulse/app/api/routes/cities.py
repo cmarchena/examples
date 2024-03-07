@@ -19,7 +19,6 @@ async def create_city(city: CityCreate, db: AsyncSession = Depends(get_db_sessio
 
 @router.get("/cities/", response_model=list[CitySchema])
 async def get_cities(db: AsyncSession = Depends(get_db_session)):
-    async with db as session:
-        result = await session.execute(select(City))
-        cities = result.scalars().all()
-        return cities
+    result = await db.execute(select(City))
+    cities = result.scalars().all()
+    return cities
